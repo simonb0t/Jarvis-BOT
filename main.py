@@ -1,44 +1,47 @@
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
-import openai
-import os
+from openai import OpenAI
 
-# Inicializa Flask
-app = Flask(__name__)
+# Inicializamos Flask y OpenAI
+app = Flask(_name_)
+client = OpenAI()
 
-# Configura tu clave de OpenAI (puedes usar variables de entorno en Render)
-openai.api_key = os.getenv("OPENAI_API_KEY")
-
+# Ruta webhook de Twilio
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    # Recibe el mensaje entrante de WhatsApp
+    # Capturar el mensaje que manda el usuario
     incoming_msg = request.values.get("Body", "").strip()
-    from_number = request.values.get("From", "")
 
-    # Prepara la respuesta Twilio
+    # Crear la respuesta de Twilio
     resp = MessagingResponse()
     msg = resp.message()
 
     if incoming_msg:
         try:
-            # Llama a OpenAI para generar la respuesta
-            completion = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
+            # Generar respuesta con OpenAI
+            respuesta = client.chat.completions.create(
+                model="gpt-3.5-turbo",  # Puedes usar gpt-4o-mini si quieres
                 messages=[
-                    {"role": "system", "content": "Eres Jarvis, el asistente personal del usuario. Responde de forma clara y útil."},
+                    {"role": "system", "content": "Eres Jarvis, un asistente útil y amigable."},
                     {"role": "user", "content": incoming_msg}
                 ]
             )
 
-            reply_text = completion.choices[0].message["content"].strip()
-        except Exception as e:
-            reply_text = f"⚠️ Error procesando tu mensaje: {str(e)}"
-    else:
-        reply_text = "Hola, soy Jarvis. ¿En qué puedo ayudarte?"
+            reply_text = respuesta.choices[0].message.content.strip()
+            msg.body(reply_text)
 
-    # Responde al usuario en WhatsApp
-    msg.body(reply_text)
+        except Exception as e:
+            msg.body(f"Ocurrió un error: {str(e)}")
+    else:
+        msg.body("No entendí tu mensaje, ¿puedes repetirlo?")
+
     return str(resp)
 
-if __name__ == "__main__":
+# Ruta raíz de prueba
+@app.route("/", methods=["GET"])
+def home():
+    return "✅ Jarvis está corriendo en Render con Twilio WhatsApp."
+
+# Iniciar servidor
+if _name_ == "_main_":
     app.run(host="0.0.0.0", port=5000)
