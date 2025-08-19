@@ -4,7 +4,7 @@ from openai import OpenAI
 import os
 
 # Inicializa Flask
-app = Flask(_name_)
+app = Flask(__name__)
 
 # Inicializa OpenAI con tu API key desde variables de entorno
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
