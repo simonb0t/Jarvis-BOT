@@ -23,7 +23,7 @@ def webhook():
         if incoming_msg:
             # Llamar al modelo de OpenAI
             completion = client.chat.completions.create(
-                model="gpt-3.5-turbo",
+                model="gpt-4.1-mini",
                 messages=[
                     {"role": "system", "content": "Eres Jarvis, un asistente personal que responde en español."},
                     {"role": "user", "content": incoming_msg}
