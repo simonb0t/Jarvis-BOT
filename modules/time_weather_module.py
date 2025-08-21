@@ -1,23 +1,21 @@
 # modules/time_weather_module.py
 from __future__ import annotations
-
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
-
 import requests
 from zoneinfo import ZoneInfo
 
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
-# Config opcional desde Config Vars (Heroku)
-HOME_CITY = os.getenv("HOME_CITY", "").strip()          # p.ej. "Santo Domingo, DO"
-HOME_LAT = os.getenv("HOME_LAT", "").strip()            # p.ej. "18.4861"
-HOME_LON = os.getenv("HOME_LON", "").strip()            # p.ej. "-69.9312"
-HOME_TZ  = os.getenv("HOME_TZ", "").strip()             # p.ej. "America/Santo_Domingo"
+# Config desde Heroku (opcional)
+HOME_CITY = os.getenv("HOME_CITY", "").strip()
+HOME_LAT = os.getenv("HOME_LAT", "").strip()
+HOME_LON = os.getenv("HOME_LON", "").strip()
+HOME_TZ  = os.getenv("HOME_TZ", "").strip()
 
 @dataclass
 class Place:
@@ -27,33 +25,26 @@ class Place:
     lon: float
     tz: str
 
-# ---- utilidades internas ----
-
 def _clean(s: Optional[str]) -> str:
-    import re as _re
-    return _re.sub(r"\s+", " ", (s or "")).strip()
+    return re.sub(r"\s+", " ", (s or "")).strip()
 
 def _from_env_home() -> Optional[Place]:
     try:
         if HOME_LAT and HOME_LON and HOME_TZ:
             return Place(
-                name=HOME_CITY or "tu zona",
-                country="",
-                lat=float(HOME_LAT),
-                lon=float(HOME_LON),
-                tz=HOME_TZ,
+                name=HOME_CITY or "tu zona", country="",
+                lat=float(HOME_LAT), lon=float(HOME_LON), tz=HOME_TZ
             )
+        if HOME_CITY:
+            return geocode_city(HOME_CITY)
     except Exception:
         pass
     return None
 
 def geocode_city(query: str) -> Optional[Place]:
-    """Devuelve Place usando Open-Meteo Geocoding (sin API key)."""
     q = _clean(query)
     try:
-        r = requests.get(GEOCODE_URL, params={
-            "name": q, "count": 1, "language": "es", "format": "json"
-        }, timeout=10)
+        r = requests.get(GEOCODE_URL, params={"name": q, "count": 1, "language": "es", "format": "json"}, timeout=10)
         r.raise_for_status()
         j = r.json()
         results = j.get("results") or []
@@ -71,7 +62,6 @@ def geocode_city(query: str) -> Optional[Place]:
         return None
 
 def _weather_desc_from_wmo(code: int) -> str:
-    # Descripciones breves (tabla WMO resumida)
     table = {
         0: "Despejado", 1: "Mayormente despejado", 2: "Parcialmente nublado", 3: "Nublado",
         45: "Niebla", 48: "Niebla con escarcha",
@@ -85,10 +75,8 @@ def _weather_desc_from_wmo(code: int) -> str:
     }
     return table.get(int(code), f"Código meteo {code}")
 
-# ---- API públicas ----
-
+# -------- Hora --------
 def get_time(place: Optional[Place]) -> str:
-    """Devuelve hora local del lugar (o de HOME_* si place=None y está configurado)."""
     if not place:
         place = _from_env_home()
         if not place:
@@ -99,13 +87,12 @@ def get_time(place: Optional[Place]) -> str:
         label = f"{place.name}, {place.country}".strip().strip(",")
         return f"⏰ Hora local en {label}: {now.strftime('%Y-%m-%d %H:%M')}"
     except Exception:
-        # Fallback sin tz: hora UTC
         now = datetime.utcnow()
         label = f"{place.name}, {place.country}".strip().strip(",")
         return f"⏰ Hora (UTC) en {label}: {now.strftime('%Y-%m-%d %H:%M')}"
 
+# -------- Clima actual --------
 def get_weather(place: Optional[Place]) -> str:
-    """Clima actual en el lugar dado (o 'mi zona' vía env vars)."""
     if not place:
         place = _from_env_home()
         if not place:
@@ -120,7 +107,7 @@ def get_weather(place: Optional[Place]) -> str:
             "timezone": place.tz or "auto",
         }, timeout=10)
         resp.raise_for_status()
-        j = resp.json().get("current", {})  # API v2.0 de Open-Meteo
+        j = resp.json().get("current", {})
         t = j.get("temperature_2m")
         st = j.get("apparent_temperature")
         rh = j.get("relative_humidity_2m")
@@ -133,13 +120,63 @@ def get_weather(place: Optional[Place]) -> str:
     except Exception:
         return "No pude obtener el clima ahora mismo."
 
-# ---- Parseo básico de ubicación en texto ----
+# -------- Fechas (“domingo de esta semana”, etc.) --------
+WEEKDAYS = {
+    "lunes": 0, "martes": 1, "miércoles": 2, "miercoles": 2, "jueves": 3,
+    "viernes": 4, "sábado": 5, "sabado": 5, "domingo": 6
+}
 
+def _now_tz() -> datetime:
+    tz = ZoneInfo(HOME_TZ) if HOME_TZ else ZoneInfo("UTC")
+    return datetime.now(tz)
+
+def next_weekday_date(weekday_name: str, same_week: bool = True) -> Optional[str]:
+    wd = WEEKDAYS.get(weekday_name.lower())
+    if wd is None:
+        return None
+    today = _now_tz().date()
+    today_w = today.weekday()  # 0=lunes
+    if same_week:
+        # domingo de ESTA semana: mover dentro de la semana actual (lunes-domingo)
+        # calcular lunes de esta semana:
+        monday = today - timedelta(days=today_w)
+        target = monday + timedelta(days=wd)
+        # si el target ya pasó, igual devolvemos el de esta semana (pasado). Si prefieres próximo, cambia lógica.
+    else:
+        # próximo <día>
+        delta = (wd - today_w) % 7
+        delta = 7 if delta == 0 else delta
+        target = today + timedelta(days=delta)
+    return target.isoformat()
+
+def answer_date_question(texto: str) -> Optional[str]:
+    t = _clean(texto).lower()
+    # “fecha de mañana”, “fecha de hoy”
+    if "fecha de hoy" in t or (("hoy" in t) and "fecha" in t):
+        return f"📅 Hoy es {_now_tz().date().isoformat()} ({HOME_TZ or 'UTC'})."
+    if "fecha de mañana" in t or (("mañana" in t) and "fecha" in t):
+        return f"📅 Mañana es {(_now_tz().date()+timedelta(days=1)).isoformat()} ({HOME_TZ or 'UTC'})."
+
+    # “fecha del domingo de esta semana”
+    m = re.search(r"fecha del?\s+([a-záéíóúüñ]+)\s+de\s+esta\s+semana", t)
+    if m:
+        day = m.group(1)
+        d = next_weekday_date(day, same_week=True)
+        if d:
+            return f"📅 {day.title()} de esta semana es {d} ({HOME_TZ or 'UTC'})."
+
+    # “próximo domingo”, “el próximo jueves”
+    m2 = re.search(r"(?:proximo|próximo)\s+([a-záéíóúüñ]+)", t)
+    if m2:
+        day = m2.group(1)
+        d = next_weekday_date(day, same_week=False)
+        if d:
+            return f"📅 Próximo {day.title()} es {d} ({HOME_TZ or 'UTC'})."
+
+    return None
+
+# ---- Parseo básico de ubicación en texto ----
 def extract_place_from_text(texto: str) -> Optional[str]:
-    """
-    Extrae algo como 'en Madrid', 'de Buenos Aires', 'para Bogotá'.
-    Devuelve la cadena de ciudad si parece presente; si no, None.
-    """
     t = _clean(texto).lower()
     m = re.search(r"(?:en|de|para|por|sobre)\s+([a-záéíóúüñ .,'-]{2,})$", t)
     if m:
