@@ -3,71 +3,74 @@ import os
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 from modules.memory_module import guardar_idea
-from modules.voice_module import hablar_epico
+from modules.transcribe_module import descargar_media_twilio, transcribir_audio_bytes
 
-app = Flask(__name__, static_url_path="/static", static_folder="static")
+app = Flask(__name__)
+
+@app.get("/")
+def home():
+    return "Jarvis WhatsApp OK"
+
+@app.get("/whatsapp")
+def whatsapp_get():
+    return "Endpoint WhatsApp OK (POST desde Twilio)"
 
 def mejorar_texto_rapido(texto: str) -> str:
-    """
-    Mini-‘actitud’ de Jarvis: pulir y sugerir siguiente paso de forma breve.
-    (Aquí luego puedes enchufar un LLM si quieres más potencia.)
-    """
     base = texto.strip()
     if len(base) < 10:
-        return f"Idea registrada. Siguiente paso: define el objetivo y una acción concreta para hoy."
+        return "Idea registrada. Siguiente paso: define objetivo y una acción concreta para hoy."
     return f"{base}\n\nSiguiente paso: prioriza, define un resultado medible y un primer bloque de 25 minutos."
 
-def procesar_mensaje_usuario(mensaje: str) -> (str, str | None):
-    """
-    Devuelve (texto_respuesta, url_audio_opcional)
-    """
+def procesar_mensaje_texto(mensaje: str) -> str:
     text = mensaje.strip()
 
     # Saluditos
-    if text.lower() in ("hola", "buenas", "hey", "ola"):
-        respuesta = "¡Hola! Soy Jarvis. Pásame ideas con el prefijo 'idea ' o pídeme opinión con 'opina:'."
-        url_audio = hablar_epico("Hola. Soy Jarvis. ¿En qué te ayudo hoy?")
-        return respuesta, url_audio
+    if text.lower() in ("hola", "buenas", "hey", "ola", "hola jarvis"):
+        return "¡Hola! Soy Jarvis. Usa 'idea ...' para registrar o 'opina: ...' para que la perfeccione."
 
     # Registrar idea
     if text.lower().startswith("idea "):
         contenido = text[5:].strip()
         guardar_idea(contenido, categoria="ideas", prioridad=2)
-        respuesta = f"Anoté tu idea: “{contenido}”. ¿La refino? Escribe: opina: {contenido}"
-        url_audio = hablar_epico(f"Anoté tu idea. {contenido}. ¿Quieres que la refine ahora?")
-        return respuesta, url_audio
+        return f"Anoté tu idea: “{contenido}”. Si quieres que la refine, escribe: opina: {contenido}"
 
     # Opinar/Perfeccionar
     if text.lower().startswith("opina:"):
         contenido = text.split(":", 1)[1].strip()
         mejora = mejorar_texto_rapido(contenido)
-        url_audio = hablar_epico(f"Mi sugerencia: {mejora}")
-        return mejora, url_audio
+        return mejora
 
-    # Default: eco + invitación a formato
-    respuesta = "Recibido. Si es una idea, usa: 'idea Tu idea aquí'. Para que opine: 'opina: Tu texto'."
-    url_audio = hablar_epico("Mensaje recibido. Si es una idea, comienza con 'idea'.")
-    return respuesta, url_audio
+    # Default
+    return "Recibido. Si es una idea, usa: 'idea Tu idea aquí'. Para que opine: 'opina: Tu texto'."
 
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_reply():
-    msg = request.form.get("Body", "")
-    texto, url_audio = procesar_mensaje_usuario(msg)
-
     tw_resp = MessagingResponse()
+    try:
+        # 1) ¿Viene audio?
+        num_media = int(request.form.get("NumMedia", "0"))
+        if num_media > 0:
+            content_type = request.form.get("MediaContentType0", "")
+            media_url = request.form.get("MediaUrl0", "")
+            if content_type.startswith("audio") and media_url:
+                # Descargar + transcribir
+                audio_bytes = descargar_media_twilio(media_url)
+                # Intenta inferir extensión por Content-Type
+                ext = "ogg" if "ogg" in content_type or "opus" in content_type else "mp3"
+                texto = transcribir_audio_bytes(audio_bytes, filename=f"audio.{ext}")
+                # Procesarlo como texto
+                respuesta = procesar_mensaje_texto(texto)
+                tw_resp.message(f"🎙️ Transcripción: {texto}\n\n{respuesta}")
+                return str(tw_resp)
 
-    # 1) Mensaje de texto
-    tw_resp.message(texto)
+        # 2) Si no hay audio, tratamos como texto normal
+        body = request.form.get("Body", "")
+        respuesta = procesar_mensaje_texto(body)
+        tw_resp.message(respuesta)
+        return str(tw_resp)
 
-    # 2) Mensaje con audio (si se generó)
-    if url_audio:
-        msg_audio = tw_resp.message("🎧 Audio:")
-        msg_audio.media(url_audio)
-
-    return str(tw_resp)
-    # al inicio ya tienes app = Flask(__name__, ...)
-
-@app.get("/whatsapp")
-def whatsapp_get():
-    return "Endpoint WhatsApp OK (use POST desde Twilio)"
-
+    except Exception as e:
+        # Nunca rompas el webhook: responde algo útil y loguea
+        print(f"[whatsapp] error: {e}")
+        tw_resp.message("Hubo un error procesando tu mensaje. Intenta de nuevo.")
+        return str(tw_resp)
