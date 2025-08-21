@@ -1,22 +1,26 @@
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
+from modules.memory_module import guardar_idea
 
 app = Flask(__name__)
 
 def procesar_mensaje(mensaje: str) -> str:
     """
-    Lógica central de Jarvis para WhatsApp.
-    Aquí luego integraremos memoria y voz.
+    Lógica de Jarvis para WhatsApp:
+    - Reconoce saludo
+    - Guarda ideas
+    - Responde por defecto
     """
     text = mensaje.strip().lower()
 
     if "hola" in text or "buenas" in text:
         return "¡Hola! Soy Jarvis, listo para ayudarte por WhatsApp."
+
     elif text.startswith("idea "):
-        # Ejemplo: "idea crear app de hábitos"
         contenido = mensaje[5:].strip()
-        # Aquí luego llamaremos a guardar_idea(contenido)
-        return f"Anoté tu idea: “{contenido}”. ¿La guardo en memoria?"
+        guardar_idea(contenido)  # Guardamos en la base de datos
+        return f"Anoté tu idea: “{contenido}” ✅"
+
     else:
         return f"Recibido: {mensaje}"
 
