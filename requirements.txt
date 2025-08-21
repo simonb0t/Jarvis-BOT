@@ -5,3 +5,4 @@ SpeechRecognition
 pydub
 schedule
 sqlite3-binary
+elevenlabs
