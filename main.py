@@ -1,17 +1,13 @@
-from modules.whatsapp_module import recibir_mensaje, enviar_respuesta
-from modules.voice_module import hablar
-from modules.memory_module import guardar_idea, consultar_ideas
+from modules.whatsapp_module import app
+from modules.automation_module import iniciar_automatizacion
+import threading
 
-def procesar_input(input_text):
-    # Guardar la idea automáticamente
-    guardar_idea(input_text)
-    # Responder con un mensaje
-    respuesta = f"Jarvis ha registrado tu idea: {input_text}"
-    return respuesta
-
-# Este sería el main loop (simplificado)
 if __name__ == "__main__":
-    mensaje = recibir_mensaje()
-    respuesta = procesar_input(mensaje)
-    enviar_respuesta(respuesta)
-    hablar(respuesta)
+    print("🚀 Jarvis WhatsApp server corriendo en http://localhost:5000/whatsapp")
+
+    # Hilo paralelo para las automatizaciones
+    t = threading.Thread(target=iniciar_automatizacion, daemon=True)
+    t.start()
+
+    # Servidor Flask
+    app.run(port=5000)
