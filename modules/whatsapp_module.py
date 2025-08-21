@@ -8,13 +8,22 @@ from twilio.twiml.messaging_response import MessagingResponse
 
 from modules.memory_module import guardar_idea, consultar_ideas
 from modules.transcribe_module import descargar_media_twilio, transcribir_audio_bytes
+from modules.web_search_module import web_answer
+from modules.time_weather_module import (
+    extract_place_from_text, geocode_city, get_time, get_weather
+)
+
+# Import opcional de conocimiento local (si no está, no rompe)
+try:
+    from modules.knowledge_module import responder_conocimiento  # type: ignore
+except Exception:
+    responder_conocimiento = None  # noqa
 
 app = Flask(__name__)
 
 # =========================
 # Contexto por usuario
 # =========================
-# Clave: número (From), Valor: último texto comprendido (audio o texto)
 ULTIMO_TEXTO: Dict[str, str] = {}
 
 # =========================
@@ -36,6 +45,20 @@ def _as_int(v: Optional[str], default: int = 0) -> int:
         return int(v or default)
     except Exception:
         return default
+
+def _looks_like_question(t: str) -> bool:
+    low = t.lower()
+    return (
+        "?" in t
+        or low.startswith(("qué", "que", "cómo", "como", "cuánto", "cuanta", "cuando", "dónde", "donde", "por qué", "porque"))
+    )
+
+# ====== Intentos de hora/clima ======
+def _is_time_intent(low: str) -> bool:
+    return any(k in low for k in ("hora", "qué hora", "que hora", "time"))
+
+def _is_weather_intent(low: str) -> bool:
+    return any(k in low for k in ("clima", "tiempo", "temperatura", "pronóstico", "pronostico", "weather"))
 
 # =========================
 # Rutas (solo /whatsapp aquí)
@@ -71,7 +94,6 @@ def whatsapp_reply() -> str:
                         texto = _clean(transcribir_audio_bytes(audio_bytes, filename=f"audio.{ext}"))
                         if texto:
                             ULTIMO_TEXTO[phone] = texto
-                        # Lógica de respuesta sobre lo transcrito
                         resp_texto = responder(texto, phone)
                         tw.message(f"📝 Transcripción: {texto}\n\n{resp_texto}")
                         return str(tw)
@@ -94,14 +116,14 @@ def whatsapp_reply() -> str:
         return str(tw)
 
 # =========================
-# Lógica de conversación (modo discreto: sin sugerencias automáticas)
+# Lógica de conversación (modo discreto)
 # =========================
 CAPACIDADES = (
     "Puedo registrar ideas, perfeccionarlas cuando me lo pidas, transcribir audios, "
-    "listar tus ideas y, si lo activamos, enviarte recordatorios."
+    "decirte la hora y el clima de tu zona o de cualquier ciudad, listar tus ideas y, si lo activamos, enviarte recordatorios."
 )
 LIMITES = (
-    "No tengo voz de salida, no navego la web ni accedo a tus archivos locales. "
+    "No tengo voz de salida ni acceso a archivos locales o servicios privados. "
     "Guardo memoria básica (último mensaje e ideas)."
 )
 
@@ -123,43 +145,75 @@ def listar_ultimas_ideas(n: int = 5) -> str:
         out.append(f"• {txt}  ({fecha})")
     return "\n".join(out)
 
+def _resolve_place_from_text(t: str, is_my_zone: bool) -> Optional["modules.time_weather_module.Place"]:
+    """Devuelve Place desde el texto o 'mi zona' (env vars)."""
+    if is_my_zone:
+        return None  # get_time/get_weather usarán HOME_*
+    city = extract_place_from_text(t)
+    if city:
+        return geocode_city(city)
+    # fallback: intenta ciudad completa si el texto es corto tipo "clima madrid"
+    words = t.lower().split()
+    if len(words) <= 5 and not any(w in words for w in ("en", "de", "para", "por", "sobre")):
+        return geocode_city(t)
+    return None
+
 def responder(texto: str, phone: str) -> str:
     """
     Reglas:
-      - SOLO actúo cuando me lo pides explícitamente (modo discreto).
-      - Contesto preguntas directas (alcance, limitaciones, qué puedo hacer).
-      - 'perfecciona/guárdala' actúan sobre el último texto de ese usuario.
-    Comandos:
-      • idea <texto>
-      • opina: <texto>  | perfecciona / mejórala
-      • guárdala / guardar
-      • listar ideas  | resumen
-      • ayuda
+      - Hora y clima: 'hora en X', 'clima en X', 'qué hora es aquí', 'clima de mi zona', etc.
+      - Si parece pregunta → web (Wikipedia + fuentes).
+      - Conocimiento local opcional → primero si aplica.
+      - Comandos explícitos (idea, opina, perfecciona, guárdala, listar, ayuda).
+      - Sin sugerencias automáticas.
     """
     t = _clean(texto)
     low = t.lower()
 
-    # Preguntas directas
-    if any(k in low for k in ("limitaciones", "alcance")):
-        return f"📌 Alcance: {CAPACIDADES}\n⚠️ {LIMITES}"
-    if any(k in low for k in ("qué puedes hacer", "que puedes hacer", "como me ayudas", "que haces")):
-        return f"🛠️ {CAPACIDADES}"
+    # 0) Conocimiento local (si existe y aplica)
+    if responder_conocimiento:
+        try:
+            resp_local = responder_conocimiento(t)
+            if resp_local:
+                return resp_local
+        except Exception as e:
+            print(f"[knowledge] fallo: {e}")
 
-    # Ayuda
+    # A) Hora / Clima (prioridad sobre la búsqueda web si lo mencionas explícito)
+    if _is_time_intent(low):
+        is_my_zone = any(k in low for k in ("mi zona", "aquí", "aqui"))
+        place = _resolve_place_from_text(t, is_my_zone)
+        return get_time(place)
+
+    if _is_weather_intent(low):
+        is_my_zone = any(k in low for k in ("mi zona", "aquí", "aqui"))
+        place = _resolve_place_from_text(t, is_my_zone)
+        return get_weather(place)
+
+    # B) Pregunta general → web
+    if t and _looks_like_question(t):
+        try:
+            return web_answer(t)
+        except Exception as e:
+            print(f"[web] fallo: {e}")
+
+    # C) Ayuda
     if low in ("ayuda", "help", "menu"):
         return (
             "Comandos:\n"
+            "• hora [en <ciudad>]  | hora de mi zona\n"
+            "• clima/temperatura/pronóstico [en <ciudad>] | clima de mi zona\n"
             "• idea <texto>\n"
             "• opina: <texto>  | perfecciona\n"
             "• guárdala  | guardar\n"
             "• listar ideas  | resumen"
         )
 
-    # Listar
+    # D) Listar
     if low in ("listar ideas", "resumen"):
         return listar_ultimas_ideas()
 
-    # Guardar explícito (usa último contexto)
+    # E) Guardar explícito (usa último contexto)
     if low in ("guárdala", "guardala", "guardar", "registrar", "regístrala", "registrala"):
         ultimo = ULTIMO_TEXTO.get(phone, "")
         if not ultimo:
@@ -167,7 +221,7 @@ def responder(texto: str, phone: str) -> str:
         guardar_idea(ultimo, categoria="ideas", prioridad=2)
         return f"✅ Guardada: “{_preview(ultimo)}”."
 
-    # Perfeccionar explícito (usa 'opina:' o el último contexto)
+    # F) Perfeccionar explícito
     if low.startswith("opina:"):
         contenido = _clean(t.split(":", 1)[1] if ":" in t else "")
         if not contenido:
@@ -180,7 +234,7 @@ def responder(texto: str, phone: str) -> str:
             return "No tengo contexto para perfeccionar. Envíame la idea o un audio primero."
         return "🧠 " + mejorar_texto_rapido(ultimo)
 
-    # Idea explícita
+    # G) Idea explícita
     if low.startswith("idea "):
         contenido = _clean(t[5:])
         if not contenido:
@@ -188,7 +242,7 @@ def responder(texto: str, phone: str) -> str:
         guardar_idea(contenido, categoria="ideas", prioridad=2)
         return f"✅ Guardé tu idea: “{contenido}”."
 
-    # Texto libre: solo reconocer (sin sugerencias)
+    # H) Texto libre: reconocer
     if not t:
         return "No recibí texto."
     return f"Entendido: “{_preview(t)}”."
