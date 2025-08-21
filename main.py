@@ -1,13 +1,19 @@
+# main.py
+import os
 from modules.whatsapp_module import app
 from modules.automation_module import iniciar_automatizacion
 import threading
 
+@app.get("/")   # healthcheck
+def home():
+    return "Jarvis WhatsApp OK"
+
 if __name__ == "__main__":
     print("🚀 Jarvis WhatsApp server en /whatsapp")
 
-    # Automatizaciones en hilo aparte
+    # Hilo para automatizaciones
     t = threading.Thread(target=iniciar_automatizacion, daemon=True)
     t.start()
 
-    # Flask sirve /static para los MP3 de voz
-    app.run(port=5000)
+    port = int(os.getenv("PORT", 5000))  # 👈 clave en Heroku
+    app.run(host="0.0.0.0", port=port)   # 👈 clave en Heroku
