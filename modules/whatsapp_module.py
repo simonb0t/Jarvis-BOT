@@ -8,12 +8,12 @@ from twilio.twiml.messaging_response import MessagingResponse
 
 from modules.memory_module import guardar_idea, consultar_ideas
 from modules.transcribe_module import descargar_media_twilio, transcribir_audio_bytes
-from modules.web_search_module import web_answer
+from modules.web_search_module import web_answer, web_images_answer
 from modules.time_weather_module import (
-    extract_place_from_text, geocode_city, get_time, get_weather
+    extract_place_from_text, geocode_city, get_time, get_weather, answer_date_question
 )
 
-# Import opcional de conocimiento local (si no está, no rompe)
+# Import opcional (si no lo tienes, no rompe)
 try:
     from modules.knowledge_module import responder_conocimiento  # type: ignore
 except Exception:
@@ -21,14 +21,10 @@ except Exception:
 
 app = Flask(__name__)
 
-# =========================
-# Contexto por usuario
-# =========================
+# ===== Contexto por usuario =====
 ULTIMO_TEXTO: Dict[str, str] = {}
 
-# =========================
-# Utilidades
-# =========================
+# ===== Utilidades =====
 MAX_PREVIEW_LEN = 180
 
 def _clean(s: Optional[str]) -> str:
@@ -48,21 +44,19 @@ def _as_int(v: Optional[str], default: int = 0) -> int:
 
 def _looks_like_question(t: str) -> bool:
     low = t.lower()
-    return (
-        "?" in t
-        or low.startswith(("qué", "que", "cómo", "como", "cuánto", "cuanta", "cuando", "dónde", "donde", "por qué", "porque"))
-    )
+    return ("?" in t or
+            low.startswith(("qué", "que", "cómo", "como", "cuánto", "cuanta", "cuando", "dónde", "donde", "por qué", "porque")))
 
-# ====== Intentos de hora/clima ======
 def _is_time_intent(low: str) -> bool:
     return any(k in low for k in ("hora", "qué hora", "que hora", "time"))
 
 def _is_weather_intent(low: str) -> bool:
     return any(k in low for k in ("clima", "tiempo", "temperatura", "pronóstico", "pronostico", "weather"))
 
-# =========================
-# Rutas (solo /whatsapp aquí)
-# =========================
+def _is_image_intent(low: str) -> bool:
+    return any(k in low for k in ("imagen", "imágenes", "imagenes", "foto", "fotos", "picture", "image"))
+
+# ===== Rutas =====
 @app.get("/whatsapp")
 def whatsapp_get() -> str:
     return "Endpoint WhatsApp OK (usa POST desde Twilio)"
@@ -81,7 +75,7 @@ def whatsapp_reply() -> str:
         }
         print(snapshot)
 
-        # 1) Si llega audio, transcribe y RESPONDE con lógica
+        # 1) Audio: transcribe y responde con lógica
         num_media = _as_int(request.form.get("NumMedia", "0"), 0)
         if num_media > 0:
             for i in range(num_media):
@@ -115,26 +109,20 @@ def whatsapp_reply() -> str:
         tw.message("Hubo un error procesando tu mensaje. Intenta de nuevo.")
         return str(tw)
 
-# =========================
-# Lógica de conversación (modo discreto)
-# =========================
+# ===== Conversación (modo discreto) =====
 CAPACIDADES = (
-    "Puedo registrar ideas, perfeccionarlas cuando me lo pidas, transcribir audios, "
-    "decirte la hora y el clima de tu zona o de cualquier ciudad, listar tus ideas y, si lo activamos, enviarte recordatorios."
+    "Registro y perfeccionamiento de ideas, transcripción de audios, hora y clima de tu zona o de cualquier ciudad, "
+    "búsqueda en la web (resumen + fuentes) y listados de tus ideas."
 )
 LIMITES = (
-    "No tengo voz de salida ni acceso a archivos locales o servicios privados. "
-    "Guardo memoria básica (último mensaje e ideas)."
+    "Sin voz de salida ni acceso a archivos/servicios privados. Memoria básica (último mensaje e ideas)."
 )
 
 def mejorar_texto_rapido(texto: str) -> str:
     base = _clean(texto)
     if len(base) < 10:
         return "Idea muy breve. Siguiente paso: define objetivo y una acción concreta para hoy."
-    return (
-        f"{base}\n\n"
-        "Siguiente paso: define un resultado medible y agenda un bloque de 25 minutos."
-    )
+    return f"{base}\n\nSiguiente paso: define un resultado medible y agenda un bloque de 25 minutos."
 
 def listar_ultimas_ideas(n: int = 5) -> str:
     filas = consultar_ideas(limit=n)
@@ -145,32 +133,11 @@ def listar_ultimas_ideas(n: int = 5) -> str:
         out.append(f"• {txt}  ({fecha})")
     return "\n".join(out)
 
-def _resolve_place_from_text(t: str, is_my_zone: bool) -> Optional["modules.time_weather_module.Place"]:
-    """Devuelve Place desde el texto o 'mi zona' (env vars)."""
-    if is_my_zone:
-        return None  # get_time/get_weather usarán HOME_*
-    city = extract_place_from_text(t)
-    if city:
-        return geocode_city(city)
-    # fallback: intenta ciudad completa si el texto es corto tipo "clima madrid"
-    words = t.lower().split()
-    if len(words) <= 5 and not any(w in words for w in ("en", "de", "para", "por", "sobre")):
-        return geocode_city(t)
-    return None
-
 def responder(texto: str, phone: str) -> str:
-    """
-    Reglas:
-      - Hora y clima: 'hora en X', 'clima en X', 'qué hora es aquí', 'clima de mi zona', etc.
-      - Si parece pregunta → web (Wikipedia + fuentes).
-      - Conocimiento local opcional → primero si aplica.
-      - Comandos explícitos (idea, opina, perfecciona, guárdala, listar, ayuda).
-      - Sin sugerencias automáticas.
-    """
     t = _clean(texto)
     low = t.lower()
 
-    # 0) Conocimiento local (si existe y aplica)
+    # 0) Conocimiento local opcional
     if responder_conocimiento:
         try:
             resp_local = responder_conocimiento(t)
@@ -179,41 +146,51 @@ def responder(texto: str, phone: str) -> str:
         except Exception as e:
             print(f"[knowledge] fallo: {e}")
 
-    # A) Hora / Clima (prioridad sobre la búsqueda web si lo mencionas explícito)
+    # A) Fechas concretas
+    resp_fecha = answer_date_question(t)
+    if resp_fecha:
+        return resp_fecha
+
+    # B) Hora / Clima / Imágenes
     if _is_time_intent(low):
         is_my_zone = any(k in low for k in ("mi zona", "aquí", "aqui"))
-        place = _resolve_place_from_text(t, is_my_zone)
+        place = None if is_my_zone else (geocode_city(extract_place_from_text(t) or t) if extract_place_from_text(t) or len(t.split())<=5 else None)
         return get_time(place)
 
     if _is_weather_intent(low):
         is_my_zone = any(k in low for k in ("mi zona", "aquí", "aqui"))
-        place = _resolve_place_from_text(t, is_my_zone)
+        place = None if is_my_zone else (geocode_city(extract_place_from_text(t) or t) if extract_place_from_text(t) or len(t.split())<=5 else None)
         return get_weather(place)
 
-    # B) Pregunta general → web
+    if _is_image_intent(low):
+        # elimina la palabra 'imagen/foto de' para mejorar consulta
+        q = re.sub(r"\b(imagen(es)?|foto(s)?|de|del|la|el)\b", " ", low)
+        q = _clean(q)
+        return web_images_answer(q or t)
+
+    # C) Pregunta general → web
     if t and _looks_like_question(t):
         try:
             return web_answer(t)
         except Exception as e:
             print(f"[web] fallo: {e}")
 
-    # C) Ayuda
+    # D) Ayuda
     if low in ("ayuda", "help", "menu"):
         return (
             "Comandos:\n"
             "• hora [en <ciudad>]  | hora de mi zona\n"
             "• clima/temperatura/pronóstico [en <ciudad>] | clima de mi zona\n"
-            "• idea <texto>\n"
-            "• opina: <texto>  | perfecciona\n"
-            "• guárdala  | guardar\n"
+            "• imagen de <tema/persona>\n"
+            "• idea <texto>  | opina: <texto>  | perfecciona  | guárdala\n"
             "• listar ideas  | resumen"
         )
 
-    # D) Listar
+    # E) Listar
     if low in ("listar ideas", "resumen"):
         return listar_ultimas_ideas()
 
-    # E) Guardar explícito (usa último contexto)
+    # F) Guardar/Perfeccionar
     if low in ("guárdala", "guardala", "guardar", "registrar", "regístrala", "registrala"):
         ultimo = ULTIMO_TEXTO.get(phone, "")
         if not ultimo:
@@ -221,7 +198,6 @@ def responder(texto: str, phone: str) -> str:
         guardar_idea(ultimo, categoria="ideas", prioridad=2)
         return f"✅ Guardada: “{_preview(ultimo)}”."
 
-    # F) Perfeccionar explícito
     if low.startswith("opina:"):
         contenido = _clean(t.split(":", 1)[1] if ":" in t else "")
         if not contenido:
@@ -242,21 +218,13 @@ def responder(texto: str, phone: str) -> str:
         guardar_idea(contenido, categoria="ideas", prioridad=2)
         return f"✅ Guardé tu idea: “{contenido}”."
 
-    # H) Texto libre: reconocer
+    # H) Texto libre
     if not t:
         return "No recibí texto."
     return f"Entendido: “{_preview(t)}”."
 
-# =========================
-# Detección de audio
-# =========================
+# ===== Detección de audio =====
 def _es_audio(content_type: str, url: str) -> bool:
-    """
-    Consideramos audio si:
-      - content_type empieza por 'audio'
-      - o es 'application/ogg'
-      - o la URL termina en .ogg / .m4a / .aac / .mp3
-    """
     ct = (content_type or "").lower()
     u = (url or "").lower()
     if ct.startswith("audio"):
@@ -276,4 +244,4 @@ def _ext_por_content_type(content_type: str, url: str) -> str:
         return "m4a"
     if "mp3" in ct or u.endswith(".mp3"):
         return "mp3"
-    return "ogg"  # default razonable para WhatsApp (opus/ogg)
+    return "ogg"
