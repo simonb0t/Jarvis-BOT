@@ -1,61 +1,83 @@
+from __future__ import annotations
 import requests
-import os
-from datetime import datetime
+import re
+from duckduckgo_search import DDGS
 
-# Usa Tavily si quieres, pero por defecto metemos búsqueda web gratuita
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+def _clean(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "")).strip()
 
-def search_web(query: str) -> str:
-    """
-    Realiza una búsqueda en internet y devuelve un resumen limpio.
-    """
+def _ddg_text(query: str, max_results: int = 6):
+    out = []
     try:
-        if not TAVILY_API_KEY:
-            # fallback simple con DuckDuckGo si no hay API key
-            url = f"https://api.duckduckgo.com/?q={query}&format=json&no_redirect=1&no_html=1"
-            res = requests.get(url, timeout=10)
-            data = res.json()
-            if "AbstractText" in data and data["AbstractText"]:
-                return data["AbstractText"]
-            elif "RelatedTopics" in data and data["RelatedTopics"]:
-                return data["RelatedTopics"][0].get("Text", "No encontré nada concreto.")
-            else:
-                return "No encontré resultados claros en la búsqueda."
-        else:
-            url = "https://api.tavily.com/search"
-            headers = {"Authorization": f"Bearer {TAVILY_API_KEY}"}
-            res = requests.post(url, json={"query": query, "max_results": 3}, headers=headers, timeout=10)
-            data = res.json()
-            results = [r["content"] for r in data.get("results", [])]
-            return "\n".join(results) if results else "No encontré nada concreto."
-    except Exception as e:
-        return f"Error al buscar en la web: {e}"
+        with DDGS() as ddgs:
+            for r in ddgs.text(_clean(query), max_results=max_results):
+                out.append((r.get("title") or "", r.get("href") or r.get("url") or "", r.get("body") or ""))
+    except Exception:
+        pass
+    return out
 
+def _ddg_images(query: str, max_results: int = 4):
+    urls = []
+    try:
+        with DDGS() as ddgs:
+            for r in ddgs.images(_clean(query), max_results=max_results):
+                u = r.get("image") or r.get("thumbnail") or r.get("url")
+                if u:
+                    urls.append(u)
+    except Exception:
+        pass
+    return urls
+
+def web_answer(query: str) -> str:
+    """Resumen breve + 3 fuentes."""
+    hits = _ddg_text(query, 6)
+    if not hits:
+        return "No encontré resultados claros ahora."
+    # resumen extractivo simple
+    snippets = " ".join([h[2] for h in hits if h[2]]) or ""
+    sents = re.split(r"(?<=[.!?])\s+", snippets)
+    sents = [s for s in sents if 30 <= len(s) <= 220][:3]
+    summary = " ".join(sents) if sents else (hits[0][2] or hits[0][0])
+    # 3 fuentes
+    seen_hosts, sources = set(), []
+    for title, url, _ in hits:
+        host = re.sub(r"^www\.", "", re.sub(r"^https?://", "", url)).split("/")[0]
+        if host and host not in seen_hosts:
+            seen_hosts.add(host)
+            sources.append(f"• {title}: {url}")
+        if len(sources) == 3:
+            break
+    return f"🔎 {_clean(query)}\n{summary}\n" + ("\n".join(sources) if sources else "")
+
+def web_images_answer(topic: str) -> str:
+    urls = _ddg_images(topic, 4)
+    if not urls:
+        return "No pude encontrar imágenes ahora mismo."
+    lines = ["🖼️ Imágenes:"]
+    for u in urls:
+        lines.append(f"• {u}")
+    return "\n".join(lines)
 
 def handle_smart_query(text: str) -> str:
-    """
-    Analiza el texto y decide si es hora, clima, imágenes o pregunta general.
-    """
-    lower = text.lower()
+    """Router: hora, clima, imágenes o pregunta abierta (todo vía web)."""
+    t = _clean(text).lower()
 
-    # --- Hora ---
-    if "hora" in lower:
-        place = lower.replace("hora", "").replace("actual", "").strip()
-        if not place:
-            place = "mi ciudad actual"
-        return f"⏰ {search_web(f'current time in {place}')}"
-    
-    # --- Clima ---
-    if "clima" in lower or "tiempo" in lower:
-        place = lower.replace("clima", "").replace("tiempo", "").replace("actual", "").strip()
-        if not place:
-            place = "mi ciudad actual"
-        return f"🌦️ {search_web(f'current weather in {place}')}"
-    
-    # --- Imagen ---
-    if "imagen" in lower or "foto" in lower:
-        topic = lower.replace("imagen", "").replace("foto", "").strip()
-        return f"🖼️ Aquí tienes imágenes relacionadas: {search_web(f'image of {topic}')}"
-    
-    # --- Preguntas generales ---
-    return f"🔎 {search_web(text)}"
+    # Hora
+    if "hora" in t:
+        place = re.sub(r"\b(hora|actual|en|de|del|la|el)\b", " ", t).strip()
+        q = f"current time in {place or 'my location'}"
+        return "⏰ " + web_answer(q)
+
+    # Clima
+    if any(k in t for k in ("clima", "tiempo", "temperatura", "pronóstico", "pronostico", "weather")):
+        place = re.sub(r"\b(clima|tiempo|temperatura|pronóstico|pronostico|en|de|del|la|el|actual)\b", " ", t).strip()
+        q = f"current weather in {place or 'my city'}"
+        return "🌦️ " + web_answer(q)
+
+    # Imágenes
+    if any(k in t for k in ("imagen", "imagenes", "imágenes", "foto", "fotos", "image", "picture")):
+        topic = re.sub(r"\b(imagen(es)?|foto(s)?|de|del|la|el)\b", " ", t).strip()
+        return web_images_answer(topic or text)
+
+    # Pregunta general
+    return web_answer(text)
