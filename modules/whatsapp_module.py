@@ -65,3 +65,9 @@ def whatsapp_reply():
         msg_audio.media(url_audio)
 
     return str(tw_resp)
+    # al inicio ya tienes app = Flask(__name__, ...)
+
+@app.get("/whatsapp")
+def whatsapp_get():
+    return "Endpoint WhatsApp OK (use POST desde Twilio)"
+
