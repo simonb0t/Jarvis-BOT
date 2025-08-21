@@ -1,22 +1,20 @@
 import json
 from pathlib import Path
 
-MEMORY_FILE = Path(__file__).parent / "memory_store.json"
+STORE = Path(__file__).parent / "memory_store.json"
+if not STORE.exists():
+    STORE.write_text(json.dumps({"notes": []}, indent=2))
 
 class MemoryClient:
-    def __init__(self):
-        if not MEMORY_FILE.exists():
-            MEMORY_FILE.write_text(json.dumps({"notes": []}, indent=4))
-
     def load(self):
-        return json.loads(MEMORY_FILE.read_text())
+        return json.loads(STORE.read_text())
 
-    def save(self, text):
+    def save(self, text: str):
         data = self.load()
         data["notes"].append(text)
-        MEMORY_FILE.write_text(json.dumps(data, indent=4))
+        STORE.write_text(json.dumps(data, indent=2))
 
-    def search(self, keyword):
+    def search(self, keyword: str):
         data = self.load()
-        return [n for n in data["notes"] if keyword.lower() in n.lower()]
-
+        k = keyword.lower()
+        return [n for n in data["notes"] if k in n.lower()]
