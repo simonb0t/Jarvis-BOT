@@ -3,7 +3,6 @@ import sqlite3
 conn = sqlite3.connect('jarvis.db', check_same_thread=False)
 cursor = conn.cursor()
 
-# Crear tabla si no existe
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS ideas(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
