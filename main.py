@@ -1,30 +1,19 @@
-from flask import Flask, request
-from twilio.twiml.messaging_response import MessagingResponse
-import speech_recognition as sr
+# main.py
 import os
+from modules.whatsapp_module import app
+from modules.automation_module import iniciar_automatizacion
+import threading
 
-app = Flask(__name__)
-
-# Ruta base solo para comprobar que el server está vivo
-@app.route("/")
+@app.get("/")
 def home():
-    return "Jarvis online 🚀"
-
-# Endpoint de WhatsApp
-@app.route("/whatsapp", methods=["POST"])
-def whatsapp_reply():
-    incoming_msg = request.values.get("Body", "").lower()
-    resp = MessagingResponse()
-    msg = resp.message()
-
-    if "hola" in incoming_msg:
-        msg.body("Hola, soy Jarvis. ¿En qué te ayudo?")
-    elif "idea" in incoming_msg:
-        msg.body("Perfecto, anoto tu idea 💡")
-    else:
-        msg.body("No entendí bien, ¿puedes repetir?")
-
-    return str(resp)
+    return "Jarvis WhatsApp OK"
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    print("🚀 Jarvis WhatsApp server en /whatsapp")
+
+    # Automatizaciones (resumen diario)
+    t = threading.Thread(target=iniciar_automatizacion, daemon=True)
+    t.start()
+
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
