@@ -1,15 +1,21 @@
 # modules/whatsapp_module.py
+import os
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 from modules.memory_module import guardar_idea
-# Si ya añadiste transcripción con OpenAI:
-# from modules.transcribe_module import descargar_media_twilio, transcribir_audio_bytes
+from modules.transcribe_module import descargar_media_twilio, transcribir_audio_bytes
 
 app = Flask(__name__)
+
+@app.get("/")
+def home():
+    return "Jarvis WhatsApp OK"
 
 @app.get("/whatsapp")
 def whatsapp_get():
     return "Endpoint WhatsApp OK (usa POST desde Twilio)"
+
+# --- Utilidades de respuesta ---
 
 def mejorar_texto_rapido(texto: str) -> str:
     base = texto.strip()
@@ -17,28 +23,41 @@ def mejorar_texto_rapido(texto: str) -> str:
         return "Idea registrada. Siguiente paso: define objetivo y una acción concreta para hoy."
     return f"{base}\n\nSiguiente paso: prioriza, define un resultado medible y un primer bloque de 25 minutos."
 
-def procesar_mensaje_texto(mensaje: str) -> str:
-    text = mensaje.strip()
+def respuesta_inteligente(texto: str) -> str:
+    """Responde menos hermético: reconoce, refleja y propone acción concreta."""
+    t = texto.strip()
 
-    if text.lower() in ("hola", "buenas", "hey", "ola", "hola jarvis"):
-        return "¡Hola! Soy Jarvis. Usa 'idea ...' para registrar o 'opina: ...' para que la perfeccione."
-
-    if text.lower().startswith("idea "):
-        contenido = text[5:].strip()
+    # Comandos
+    low = t.lower()
+    if low.startswith("idea "):
+        contenido = t[5:].strip()
         guardar_idea(contenido, categoria="ideas", prioridad=2)
-        return f"Anoté tu idea: “{contenido}”. Si quieres que la refine, escribe: opina: {contenido}"
+        return (
+            f"✅ Entendí tu idea y la guardé: “{contenido}”.\n"
+            f"➡️ ¿La refino ahora? Escribe: opina: {contenido}"
+        )
+    if low.startswith("opina:"):
+        contenido = t.split(":", 1)[1].strip()
+        return "🧠 " + mejorar_texto_rapido(contenido)
+    if low in ("hola", "hola jarvis", "buenas", "hey", "ola"):
+        return ("👋 ¡Hola! Dime tu idea con: `idea ...` o pídeme mejora con: `opina: ...`.\n"
+                "También puedes mandarme un audio y lo transcribo.")
 
-    if text.lower().startswith("opina:"):
-        contenido = text.split(":", 1)[1].strip()
-        return mejorar_texto_rapido(contenido)
+    # No-comando: reconoce + sugiere guardar como idea
+    preview = (t[:180] + "…") if len(t) > 180 else t
+    return (
+        f"🎧 Entendí esto: “{preview}”.\n"
+        f"Si quieres, la guardo como idea. Envía: `idea {t}`\n"
+        f"Para pulirla: `opina: {t}`"
+    )
 
-    return "Recibido. Si es una idea, usa: 'idea Tu idea aquí'. Para que opine: 'opina: Tu texto'."
+# --- Webhook principal ---
 
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_reply():
     tw_resp = MessagingResponse()
     try:
-        # Log para ver lo que llega en Heroku logs
+        # Debug en logs (Heroku → More → View logs)
         print({
             "Body": request.form.get("Body", ""),
             "NumMedia": request.form.get("NumMedia", "0"),
@@ -46,18 +65,28 @@ def whatsapp_reply():
             "MediaUrl0": request.form.get("MediaUrl0", "")
         })
 
-        # (Si ya activaste transcripción, aquí iría el manejo de audio)
-        # num_media = int(request.form.get("NumMedia", "0"))
-        # if num_media > 0 and request.form.get("MediaContentType0", "").startswith("audio"):
-        #     audio_bytes = descargar_media_twilio(request.form.get("MediaUrl0"))
-        #     texto = transcribir_audio_bytes(audio_bytes, filename="audio.ogg")
-        #     resp_text = procesar_mensaje_texto(texto)
-        #     tw_resp.message(f"🎙️ Transcripción: {texto}\n\n{resp_text}")
-        #     return str(tw_resp)
+        num_media = int(request.form.get("NumMedia", "0") or 0)
 
-        # Texto normal
+        # 1) Si viene audio, lo transcribimos y respondemos sobre esa transcripción
+        if num_media > 0:
+            content_type = request.form.get("MediaContentType0", "")
+            media_url = request.form.get("MediaUrl0", "")
+            if media_url and content_type.startswith("audio"):
+                try:
+                    audio_bytes = descargar_media_twilio(media_url)
+                    ext = "ogg" if ("ogg" in content_type or "opus" in content_type) else "mp3"
+                    texto = transcribir_audio_bytes(audio_bytes, filename=f"audio.{ext}")
+                    respuesta = respuesta_inteligente(texto)
+                    tw_resp.message(f"📝 Transcripción: {texto}\n\n{respuesta}")
+                    return str(tw_resp)
+                except Exception as e:
+                    print(f"[transcripcion] fallo: {e}")
+                    tw_resp.message("No pude transcribir el audio ahora. ¿Puedes mandarlo en texto o intentarlo de nuevo?")
+                    return str(tw_resp)
+
+        # 2) Si no hay audio, tratamos como texto normal
         body = request.form.get("Body", "")
-        respuesta = procesar_mensaje_texto(body)
+        respuesta = respuesta_inteligente(body)
         tw_resp.message(respuesta)
         return str(tw_resp)
 
