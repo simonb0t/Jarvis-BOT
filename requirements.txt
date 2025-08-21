@@ -3,3 +3,4 @@ twilio~=9.0
 schedule~=1.2
 openai~=1.40
 requests~=2.32
+duckduckgo-search>=4.0.0
