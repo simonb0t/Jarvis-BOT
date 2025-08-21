@@ -3,11 +3,11 @@ from modules.automation_module import iniciar_automatizacion
 import threading
 
 if __name__ == "__main__":
-    print("🚀 Jarvis WhatsApp server corriendo en http://localhost:5000/whatsapp")
+    print("🚀 Jarvis WhatsApp server en /whatsapp")
 
-    # Hilo paralelo para las automatizaciones
+    # Automatizaciones en hilo aparte
     t = threading.Thread(target=iniciar_automatizacion, daemon=True)
     t.start()
 
-    # Servidor Flask
+    # Flask sirve /static para los MP3 de voz
     app.run(port=5000)
