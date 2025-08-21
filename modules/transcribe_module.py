@@ -1,42 +1,39 @@
-# modules/transcribe_module.py
+from __future__ import annotations
 import os
 import io
 import requests
-from openai import OpenAI
+from pydub import AudioSegment
+import speech_recognition as sr
 
-TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
-TWILIO_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN  = os.getenv("TWILIO_AUTH_TOKEN", "")
 
 def descargar_media_twilio(media_url: str) -> bytes:
-    """
-    Descarga el binario del audio desde Twilio (requiere auth básica).
-    media_url viene del webhook: MediaUrl0
-    """
-    # Auth básica con SID y TOKEN de Twilio
-    resp = requests.get(media_url, auth=(TWILIO_SID, TWILIO_TOKEN), timeout=30)
-    resp.raise_for_status()
-    return resp.content
+    """Descarga el binario del media de Twilio (URL privada)."""
+    auth = (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN else None
+    r = requests.get(media_url, stream=True, timeout=20, auth=auth)
+    r.raise_for_status()
+    return r.content
 
-def transcribir_audio_bytes(audio_bytes: bytes, filename: str = "audio.ogg") -> str:
-    """
-    Envía los bytes a Whisper (OpenAI) y devuelve el texto.
-    Acepta ogg/opus, m4a, mp3, wav, etc.
-    """
-    if not OPENAI_API_KEY:
-        raise RuntimeError("Falta OPENAI_API_KEY en Config Vars")
+def _to_wav_bytes(data: bytes, content_hint: str = "ogg") -> bytes:
+    """Convierte bytes (ogg/m4a/mp3/aac) a WAV usando ffmpeg vía pydub."""
+    buf_in = io.BytesIO(data)
+    # el format lo inferimos por hint; pydub usa ffmpeg
+    audio = AudioSegment.from_file(buf_in, format=content_hint)
+    buf_out = io.BytesIO()
+    audio.export(buf_out, format="wav")
+    return buf_out.getvalue()
 
-    # Pasamos los bytes como archivo in-memory
-    file_like = io.BytesIO(audio_bytes)
-    file_like.name = filename  # sugerir extensión ayuda al decoder
-
-    # Modelo de transcripción
-    # whisper-1 es el endpoint estándar de OpenAI para STT
-    result = client.audio.transcriptions.create(
-        model="whisper-1",
-        file=file_like,
-        language="es"  # forzar español si prefieres
-    )
-    return result.text.strip() if hasattr(result, "text") else str(result)
+def transcribir_audio_bytes(data: bytes, ext_hint: str = "ogg") -> str:
+    """Transcribe a texto con Google Web Speech (gratis)."""
+    wav = _to_wav_bytes(data, content_hint=ext_hint)
+    r = sr.Recognizer()
+    with sr.AudioFile(io.BytesIO(wav)) as source:
+        audio = r.record(source)
+    try:
+        # idioma: español; ajusta si quieres usar multilíngüe
+        return r.recognize_google(audio, language="es-ES")
+    except sr.UnknownValueError:
+        return ""
+    except sr.RequestError as e:
+        raise RuntimeError(f"STT error: {e}")
