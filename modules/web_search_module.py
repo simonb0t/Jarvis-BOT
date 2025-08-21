@@ -10,16 +10,15 @@ from duckduckgo_search import DDGS
 # ====== Config ======
 MAX_RESULTS = 6
 MAX_SOURCES_TO_SHOW = 3
-WIKI_LANGS = ("es", "en")  # intenta español y luego inglés
+WIKI_LANGS = ("es", "en")
 TIMEOUT = 10
 CACHE_TTL_SEC = 300  # 5 minutos
 
-# Whitelist básica de dominios más confiables
 TRUSTED_DOMAINS = (
     "wikipedia.org", "britannica.com", "khanacademy.org", "nasa.gov",
     "esa.int", "mit.edu", "stanford.edu", "harvard.edu", "who.int",
     "nih.gov", "cdc.gov", "unesco.org", "nature.com", "science.org",
-    "bbc.com", "reuters.com", "nationalgeographic.com", "esa.int", "esawebb.org"
+    "bbc.com", "reuters.com", "nationalgeographic.com"
 )
 
 _cache: Dict[str, Tuple[float, str]] = {}  # query -> (timestamp, answer)
@@ -53,16 +52,9 @@ def wiki_summary(query: str, sentences: int = 2) -> Optional[str]:
     q = _clean(query)
     for lang in WIKI_LANGS:
         try:
-            # Buscar título aproximado
             s = requests.get(
                 f"https://{lang}.wikipedia.org/w/api.php",
-                params={
-                    "action": "opensearch",
-                    "search": q,
-                    "limit": 1,
-                    "namespace": 0,
-                    "format": "json",
-                },
+                params={"action": "opensearch", "search": q, "limit": 1, "namespace": 0, "format": "json"},
                 timeout=TIMEOUT,
             )
             s.raise_for_status()
@@ -70,7 +62,6 @@ def wiki_summary(query: str, sentences: int = 2) -> Optional[str]:
             if not data or len(data) < 2 or not data[1]:
                 continue
             title = data[1][0]
-            # Summary
             p = requests.get(
                 f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{title}",
                 timeout=TIMEOUT,
@@ -80,18 +71,14 @@ def wiki_summary(query: str, sentences: int = 2) -> Optional[str]:
             extract = j.get("extract")
             if not extract:
                 continue
-            # Recorta a N oraciones
             parts = re.split(r"(?<=[.!?])\s+", extract)
             return " ".join(parts[:sentences])
         except Exception:
             continue
     return None
 
-# ---------- DuckDuckGo ----------
+# ---------- DuckDuckGo (texto) ----------
 def search_duckduckgo(query: str, max_results: int = MAX_RESULTS) -> List[Tuple[str, str, str]]:
-    """
-    Devuelve lista de (title, url, snippet).
-    """
     q = _clean(query)
     results: List[Tuple[str, str, str]] = []
     try:
@@ -106,20 +93,28 @@ def search_duckduckgo(query: str, max_results: int = MAX_RESULTS) -> List[Tuple[
         pass
     return results
 
-# ---------- Resumen híbrido ----------
+# ---------- DuckDuckGo (imágenes) ----------
+def search_images(query: str, max_results: int = 4) -> List[str]:
+    q = _clean(query)
+    urls: List[str] = []
+    try:
+        with DDGS() as ddgs:
+            for r in ddgs.images(q, max_results=max_results):
+                u = r.get("image") or r.get("thumbnail") or r.get("url")
+                if u:
+                    urls.append(u)
+    except Exception:
+        pass
+    return urls
+
+# ---------- Resumen extractivo ----------
 def _extractive_summary(snippets: List[str], max_sentences: int = 3) -> Optional[str]:
-    """
-    Resumen extractivo muy simple: toma las oraciones más
-    “centrales” por longitud/ocurrencia de términos (heurística suave).
-    Sin librerías externas para mantenerlo ligero.
-    """
     text = " ".join(_clean(s) for s in snippets if s)
     sentences = re.split(r"(?<=[.!?])\s+", text)
     sentences = [s for s in sentences if 30 <= len(s) <= 220]
     if not sentences:
         return None
 
-    # Ponderación simple por frecuencia de palabras (sin stopwords)
     words = re.findall(r"[a-záéíóúüñ0-9]{3,}", text.lower())
     freq: Dict[str, int] = {}
     for w in words:
@@ -135,10 +130,9 @@ def _extractive_summary(snippets: List[str], max_sentences: int = 3) -> Optional
     summary = " ".join(_dedupe_keep_order(ranked)[:max_sentences])
     return summary or None
 
-# ---------- Orquestador ----------
+# ---------- Orquestadores ----------
 def web_answer(query: str, max_results: int = MAX_RESULTS) -> str:
     q = _clean(query)
-    # cache
     if q in _cache:
         ts, ans = _cache[q]
         if _now() - ts < CACHE_TTL_SEC:
@@ -147,27 +141,23 @@ def web_answer(query: str, max_results: int = MAX_RESULTS) -> str:
     resumen_wiki = wiki_summary(q)
     hits = search_duckduckgo(q, max_results=max_results)
 
-    # Filtrar y ordenar: preferimos dominios confiables primero
     trusted, others = [], []
     for title, url, snippet in hits:
         (trusted if _is_trusted(url) else others).append((title, url, snippet))
     hits_sorted = trusted + others
 
-    # Construir resumen extractivo a partir de snippets
     snippets = [s for _, _, s in hits_sorted[:max_results] if s]
     resumen_extr = _extractive_summary(snippets, max_sentences=3)
 
-    # Armar respuesta final
     parts: List[str] = []
     if resumen_wiki:
         parts.append(resumen_wiki)
     if resumen_extr and (not resumen_wiki or resumen_extr not in resumen_wiki):
         parts.append(resumen_extr)
 
-    # Fuentes (máx 3, deduplicadas por host)
     shown = 0
     used_hosts = set()
-    for title, url, snippet in hits_sorted:
+    for title, url, _ in hits_sorted:
         h = _host(url)
         if not h or h in used_hosts:
             continue
@@ -177,10 +167,15 @@ def web_answer(query: str, max_results: int = MAX_RESULTS) -> str:
         if shown >= MAX_SOURCES_TO_SHOW:
             break
 
-    if not parts:
-        answer = "No encontré resultados claros ahora mismo."
-    else:
-        answer = "🔎 " + q + "\n" + "\n".join(parts)
-
+    answer = "No encontré resultados claros ahora mismo." if not parts else ("🔎 " + q + "\n" + "\n".join(parts))
     _cache[q] = (_now(), answer)
     return answer
+
+def web_images_answer(query: str) -> str:
+    urls = search_images(query, max_results=4)
+    if not urls:
+        return "No pude encontrar imágenes ahora mismo."
+    lines = ["🖼️ Imágenes:"]
+    for u in urls:
+        lines.append(f"• {u}")
+    return "\n".join(lines)
