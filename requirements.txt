@@ -2,7 +2,8 @@ Flask==3.0.3
 twilio==9.2.3
 requests==2.32.3
 duckduckgo-search==6.1.7
+langdetect==1.0.9
+deep-translator==1.11.4
 gunicorn==22.0.0
 SpeechRecognition==3.10.4
 pydub==0.25.1
-
