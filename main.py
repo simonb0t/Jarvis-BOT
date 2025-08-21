@@ -1,21 +1,30 @@
-# main.py
+from flask import Flask, request
+from twilio.twiml.messaging_response import MessagingResponse
+import speech_recognition as sr
 import os
-from modules.whatsapp_module import app
-from modules.automation_module import iniciar_automatizacion
-import threading
 
-# Healthcheck raíz (para probar en el browser)
-@app.get("/")
+app = Flask(__name__)
+
+# Ruta base solo para comprobar que el server está vivo
+@app.route("/")
 def home():
-    return "Jarvis WhatsApp OK"
+    return "Jarvis online 🚀"
+
+# Endpoint de WhatsApp
+@app.route("/whatsapp", methods=["POST"])
+def whatsapp_reply():
+    incoming_msg = request.values.get("Body", "").lower()
+    resp = MessagingResponse()
+    msg = resp.message()
+
+    if "hola" in incoming_msg:
+        msg.body("Hola, soy Jarvis. ¿En qué te ayudo?")
+    elif "idea" in incoming_msg:
+        msg.body("Perfecto, anoto tu idea 💡")
+    else:
+        msg.body("No entendí bien, ¿puedes repetir?")
+
+    return str(resp)
 
 if __name__ == "__main__":
-    print("🚀 Jarvis WhatsApp server en /whatsapp")
-
-    # Lanzar automatizaciones (resumen diario) en un hilo aparte
-    t = threading.Thread(target=iniciar_automatizacion, daemon=True)
-    t.start()
-
-    # Heroku asigna el puerto en la variable de entorno PORT
-    port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(debug=True)
