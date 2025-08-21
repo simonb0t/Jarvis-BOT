@@ -2,6 +2,7 @@ from __future__ import annotations
 import re
 from flask import Blueprint, request
 from twilio.twiml.messaging_response import MessagingResponse
+
 from modules.web_search_module import handle_smart_query, web_images_answer
 from modules.transcribe_module import descargar_media_twilio, transcribir_audio_bytes
 
@@ -17,7 +18,6 @@ def _as_int(s: str, default: int = 0) -> int:
         return default
 
 def _is_audio(ct: str, url: str) -> tuple[bool, str]:
-    """Devuelve (es_audio, ext_hint)."""
     ct = (ct or "").lower()
     u  = (url or "").lower()
     if ct.startswith("audio") or ct == "application/ogg":
@@ -46,45 +46,41 @@ def whatsapp_reply():
         wants_transcribe = any(k in low for k in ("transcribe", "transcribir", "transcripción", "transcripcion"))
         if wants_transcribe:
             if num_media == 0:
-                msg.body("Ok. Envíame una *nota de voz* (o reenvíala) junto con la palabra *transcribe* en el pie del audio.")
+                msg.body("Ok. Envíame una *nota de voz* junto con la palabra *transcribe* en el pie del audio.")
                 return str(resp)
 
-            # Tomamos el primer media que parezca audio
             for i in range(num_media):
                 ct = request.form.get(f"MediaContentType{i}", "") or ""
                 url = request.form.get(f"MediaUrl{i}", "") or ""
-                es_audio, ext = _is_audio(ct, url)
-                if es_audio and url:
+                is_audio, ext = _is_audio(ct, url)
+                if is_audio and url:
                     try:
                         raw = descargar_media_twilio(url)
                         texto = transcribir_audio_bytes(raw, ext_hint=ext) or "(no entendí el audio)"
                         msg.body(f"📝 Transcripción: {texto}")
                         return str(resp)
                     except Exception as e:
-                        msg.body(f"No pude transcribir ahora. Tip: asegúrate de hablar claro y que el audio sea de WhatsApp.\nError: {e}")
+                        msg.body(f"No pude transcribir ahora. Reintenta.\nError: {e}")
                         return str(resp)
-
-            msg.body("No detecté audio en tu mensaje. Reenvíalo con *transcribe*.")
+            msg.body("No detecté audio. Reenvíalo con *transcribe*.")
             return str(resp)
 
-        # ===== SI HAY AUDIO PERO NO LO PEDISTE → NO TRANSCRIBO =====
+        # ===== AUDIO SIN TRANSCRIBIR (no lo pides) =====
         if num_media > 0:
-            # Respuesta discreta para no consumir STT si no lo pediste.
-            msg.body("Audio recibido. Si quieres que lo *transcriba*, envíalo con la palabra *transcribe* en el pie del audio.")
+            msg.body("Audio recibido. Si quieres que lo *transcriba*, envíalo con la palabra *transcribe*.")
             return str(resp)
 
-        # ===== BÚSQUEDA WEB / IMÁGENES / HORA / CLIMA / PREGUNTAS =====
+        # ===== TEXTO / CONSULTAS WEB =====
         if not body:
             msg.body("No recibí mensaje.")
             return str(resp)
 
-        # Imagen explícita: atajo (“imagen de X”)
+        # Atajo de imágenes (“imagen de …”)
         if any(k in low for k in ("imagen", "imagenes", "imágenes", "foto", "fotos")):
             topic = re.sub(r"\b(imagen(es)?|foto(s)?|de|del|la|el)\b", " ", low).strip()
             msg.body(web_images_answer(topic or body))
             return str(resp)
 
-        # Resto: router inteligente
         msg.body(handle_smart_query(body))
         return str(resp)
 
